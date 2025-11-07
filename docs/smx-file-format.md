@@ -738,6 +738,133 @@ For by-reference parameters, the value is an address in DAT that can be derefere
 
 For array parameters, the value is typically a DAT address pointing to the array data.
 
+### Cross-Module Function Calls
+
+SMX modules can call public functions in other loaded modules through the host environment. This is not handled at the bytecode level but through the host's runtime API.
+
+#### How It Works
+
+1. **Public Functions**: Each SMX module exports public functions via the `.publics` section
+2. **Function Lookup**: Host provides API to find functions by name in any loaded plugin
+3. **Cross-Call Mechanism**: Host marshals the call between different plugin contexts
+
+#### API Flow (SourceMod/Host Implementation)
+
+**From SourcePawn code:**
+```c
+// Get handle to another plugin (provided by host)
+Handle plugin = LibraryExists("other_plugin");
+
+// Look up function by name
+Function func = GetFunctionByName(plugin, "PublicFunction");
+
+// Call the function
+Call_StartFunction(plugin, func);
+Call_PushCell(42);
+Call_PushString("hello");
+int result;
+Call_Finish(result);
+```
+
+**Host implementation:**
+1. `GetFunctionByName(plugin, name)`:
+   - Host looks up `name` in target plugin's `.publics` section
+   - Returns function ID if found
+   
+2. `Call_StartFunction(plugin, func)`:
+   - Host prepares cross-context call
+   - Sets up marshalling between source and target contexts
+   
+3. `Call_Push*()`:
+   - Host buffers parameters
+   - May need to copy data between plugin memory spaces
+   
+4. `Call_Finish()`:
+   - Host switches to target plugin's context
+   - Pushes parameters onto target's stack
+   - Executes CALL to function offset from `.publics`
+   - Captures return value
+   - Switches back to caller's context
+   - Handles any copyback for by-reference parameters
+
+#### Memory Isolation
+
+Each SMX module has its own:
+- Separate DAT segment (globals + heap)
+- Separate STK segment (stack)
+- Separate CODE segment (bytecode)
+
+**Important**: Direct memory addresses cannot be passed between modules. The host must:
+- Copy data when passing strings/arrays between contexts
+- Handle by-reference parameters by copying data back after call
+- Manage memory addresses separately per context
+
+#### Implementation Requirements
+
+For a VM to support cross-module calls, the host must:
+
+1. **Plugin Management**:
+   - Load multiple SMX files simultaneously
+   - Maintain separate contexts per plugin
+   - Track plugin handles/identifiers
+
+2. **Function Registry**:
+   - Index all public functions from all loaded plugins
+   - Provide lookup API: `FindFunction(plugin, name) -> funcid`
+
+3. **Call Marshalling**:
+   - Buffer parameters during Call_Push* operations
+   - Switch execution context for cross-calls
+   - Copy parameter data between contexts
+   - Handle copyback for by-reference parameters
+
+4. **Context Switching**:
+```c
+// Pseudo-code for cross-context call
+int CrossContextCall(Context* caller, Context* target, funcid_t func) {
+    // Save caller state
+    SaveContext(caller);
+    
+    // Switch to target
+    SetActiveContext(target);
+    
+    // Copy parameters from caller stack to target stack
+    for (param in buffered_params) {
+        PushToStack(target, param);
+    }
+    
+    // Execute function in target context
+    cell_t result;
+    target->Execute(func, &result);
+    
+    // Handle copyback for by-reference params
+    CopybackParameters(caller, target);
+    
+    // Switch back to caller
+    SetActiveContext(caller);
+    RestoreContext(caller);
+    
+    return result;
+}
+```
+
+#### Security Considerations
+
+- **Memory safety**: Each plugin's memory is isolated
+- **Access control**: Host can restrict which plugins can call each other
+- **Resource limits**: Each plugin has separate heap/stack limits
+- **Error isolation**: Errors in one plugin shouldn't crash others
+
+#### Bytecode Perspective
+
+From the bytecode's perspective, cross-module calls look like native calls:
+- The calling code uses `Call_StartFunction` (implemented as a native)
+- Parameters are pushed using natives (`Call_PushCell`, etc.)
+- `Call_Finish` (a native) performs the actual cross-context call
+- The VM doesn't know it's calling another plugin; the host handles it
+
+**Key Point**: Cross-module functionality is a **host feature**, not an SMX bytecode feature. The SMX format only provides the `.publics` section for exporting functions; the host environment implements the cross-call mechanism.
+
 ### Error Handling
 
 Runtime errors can occur from:
@@ -1052,6 +1179,29 @@ A minimal VM must:
 2. Implement stack traces
 3. Implement source mapping
 4. Support variable inspection
+
+#### Phase 8: Multi-Plugin Support (Optional)
+
+For environments that need to run multiple SMX modules:
+
+1. **Plugin Context Management**:
+   - Load multiple SMX files
+   - Maintain separate execution contexts (CODE/DAT/STK per plugin)
+   - Track plugin handles/identifiers
+
+2. **Cross-Module Calls**:
+   - Implement function registry for all loaded plugins
+   - Create API: `GetFunctionByName(plugin, name)`
+   - Implement call marshalling between contexts
+   - Handle parameter copying between plugin memory spaces
+   - Support copyback for by-reference parameters
+
+3. **Isolation**:
+   - Ensure memory isolation between plugins
+   - Separate error handling per plugin
+   - Independent resource limits
+
+See [Cross-Module Function Calls](#cross-module-function-calls) for implementation details.
 
 ### Testing
 
