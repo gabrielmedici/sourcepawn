@@ -751,7 +751,7 @@ SMX modules can call public functions in other loaded modules through the host e
 #### API Flow (SourceMod/Host Implementation)
 
 **From SourcePawn code:**
-```c
+```javascript
 // Get handle to another plugin (provided by host)
 Handle plugin = LibraryExists("other_plugin");
 
@@ -829,8 +829,8 @@ int CrossContextCall(Context* caller, Context* target, funcid_t func) {
     SetActiveContext(target);
     
     // Copy parameters from caller stack to target stack
-    for (param in buffered_params) {
-        PushToStack(target, param);
+    for (int i = 0; i < buffered_params.count; i++) {
+        PushToStack(target, buffered_params[i]);
     }
     
     // Execute function in target context
