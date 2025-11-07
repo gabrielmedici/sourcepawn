@@ -67,11 +67,18 @@ Overview
 The SourcePawn source tree is divided into the following folders:
  - `compiler` - The legacy compiler, currently used in SourceMod.
  - `vm` - The virtual machine and just-in-time compiler.
+ - `docs` - Documentation including the [SMX file format specification](docs/smx-file-format.md).
  - `exp` - Experimental projects.
   - `compiler` - The v2 compiler for SourcePawn 1.7.
    - `docgen` - The documentation generator and web frontend.
    - `tools`
     - `docparse` - Parse files into JSON that can be consumed by documentation generators.
+
+Documentation
+-------------
+
+ - [SMX File Format and VM Specification](docs/smx-file-format.md) - Comprehensive guide to the SMX binary format and how to implement a VM to execute it.
+ - [Language Specification](docs/specification.md) - SourcePawn language type system and semantics.
 
 History
 -------
