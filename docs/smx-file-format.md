@@ -14,6 +14,17 @@ This document describes the SMX (SourceMod eXecutable) binary file format and ho
 - Runtime type information (RTTI)
 - Debug information
 
+### Quick Facts
+
+- **Magic**: `0x53504646` ("SPFF")
+- **Endianness**: Little-endian
+- **Cell Size**: 32-bit (4 bytes)
+- **Current Version**: 0x0107 (SourcePawn 1.7)
+- **Compression**: Optional gzip on section data
+- **Instruction Format**: Variable-length (1-6 cells per instruction)
+- **Registers**: PRI, ALT, FRM, STK, HEP, CIP (all 32-bit)
+- **Memory**: CODE (read-only), DAT (data+heap), STK (stack)
+
 ## Table of Contents
 
 1. [File Format Overview](#file-format-overview)
@@ -46,8 +57,10 @@ An SMX file is a container format with the following structure:
 - **Magic Number**: `0x53504646` (ASCII: "SPFF" - SourcePawn File Format)
 - **Endianness**: Little-endian (same as x86)
 - **Cell Size**: 32-bit (4 bytes) - the fundamental data unit
+- **Alignment**: All code offsets must be 4-byte aligned
 - **Compression**: Optional gzip compression of section data
 - **Platform**: Cross-platform within same endianness architectures
+- **String Encoding**: Null-terminated, typically UTF-8 or ASCII
 
 ---
 
@@ -691,12 +704,39 @@ When SYSREQ.C/SYSREQ.N is executed:
 5. Result placed in PRI
 6. VM resumes
 
-Native signature:
+#### Native Callback Interface
+
+Native signature (C/C++):
 ```c
 cell_t NativeCallback(IPluginContext* context, const cell_t* params);
 // params[0] = number of parameters
 // params[1..N] = actual parameters
 ```
+
+The context provides APIs for:
+- **Memory Access**: Read/write DAT memory
+- **String Operations**: Read/write strings from memory
+- **Array Access**: Handle array parameters
+- **Native References**: Access by-reference parameters
+- **Error Reporting**: Report runtime errors
+
+**Important**: Natives must:
+- Validate all parameters and memory addresses
+- Check array bounds before access
+- Return error codes via context if operation fails
+- Not leak stack items (save/restore STK if modified)
+- Not leak heap items (save/restore HEP if modified)
+
+#### Parameter Passing
+
+Parameters are on the stack at the time of native call:
+```
+STK → [param_count] [param1] [param2] ...
+```
+
+For by-reference parameters, the value is an address in DAT that can be dereferenced.
+
+For array parameters, the value is typically a DAT address pointing to the array data.
 
 ### Error Handling
 
@@ -704,10 +744,15 @@ Runtime errors can occur from:
 - **Bounds violations**: BOUNDS check fails
 - **Invalid memory access**: Out of bounds memory access
 - **Stack overflow/underflow**: Stack limit exceeded
-- **Divide by zero**: SDIV with zero
+- **Divide by zero**: SDIV with zero divisor
+- **Integer overflow**: Special case: `-INT_MIN / -1` causes overflow
 - **Unbound native**: Calling native that wasn't provided
 - **Invalid opcode**: Unrecognized instruction
-- **HALT instruction**: Explicit error
+- **HALT instruction**: Explicit error with error code
+- **Array too big**: Heap allocation request too large
+- **Timeout**: Execution time limit exceeded (if watchdog enabled)
+
+Error codes are defined in `sp_vm_types.h` (SP_ERROR_* constants).
 
 VM should provide stack traces using debug info when errors occur.
 
@@ -779,6 +824,43 @@ Type encodings use these control bytes:
 - `0x71`: Legacy variadic
 - `0x72`: By-reference parameter
 - `0x73`: const
+
+### Variable-Length Integer Encoding
+
+uint32 values in `rtti.data` are encoded with a variable-length encoding to save space:
+
+```
+Byte 0: [Continue bit (1)] [7 bits of value]
+Byte 1: [Continue bit (1)] [7 bits of value]
+...
+Last:   [0] [7 bits of value]
+```
+
+**Encoding Algorithm**:
+```c
+uint32_t decode_varuint32(const uint8_t* data) {
+    uint32_t value = 0;
+    uint32_t shift = 0;
+    while (true) {
+        uint8_t byte = *data++;
+        value |= (byte & 0x7f) << shift;
+        if ((byte & 0x80) == 0)  // No continue bit
+            break;
+        shift += 7;
+    }
+    return value;
+}
+```
+
+**Examples**:
+- `0x05` = 5 (1 byte)
+- `0x80 0x01` = 128 (2 bytes: 0x00|0x01 = 0x80)
+- `0xFF 0x7F` = 16383 (2 bytes: 0x7F|0x7F = 0x3FFF)
+
+This encoding is used for:
+- Array sizes in type definitions
+- Table indices in named types
+- Parameter counts in function types
 
 ### Method Signatures
 
@@ -1003,6 +1085,40 @@ The SourcePawn VM source code is the definitive reference:
 - `vm/smx-v1-image.cpp`: SMX parser
 - `vm/plugin-context.cpp`: Execution context
 
+### Common Implementation Pitfalls
+
+1. **Forgetting alignment**: All code offsets must be 4-byte aligned
+2. **Wrong endianness**: SMX is always little-endian
+3. **Cell size confusion**: Always 4 bytes, never check cellsize != 4
+4. **Stack direction**: Stack grows DOWN (decreasing addresses)
+5. **Frame layout**: Return address is at FRM+0, not FRM-4
+6. **Parameter access**: First param is count at params[0], not params[1]
+7. **Compression**: Must decompress in-place if compression is enabled
+8. **Native leaks**: Natives must restore STK/HEP if they modify them
+9. **Bounds checks**: BOUNDS checks unsigned comparison (PRI >= limit)
+10. **Integer overflow**: Check for `-INT_MIN / -1` special case in SDIV
+
+### Validation Checklist
+
+Before running bytecode, verify:
+- [ ] Magic number is `0x53504646`
+- [ ] Version is supported (0x0101-0x0107 for SP1)
+- [ ] Code version is >= 9 and <= 13
+- [ ] All section offsets are within file bounds
+- [ ] All name table offsets are valid
+- [ ] Entry point (main) is valid code offset
+- [ ] Data section size is reasonable
+- [ ] All required sections present (.code, .data, .natives, .publics, .names)
+
+### Debugging Tips
+
+1. **Enable opcode tracing**: Print each instruction before execution
+2. **Watch register state**: Log PRI/ALT/FRM/STK/HEP after each instruction
+3. **Validate memory accesses**: Add bounds checking even if not required
+4. **Compare with reference**: Run same plugin on SourcePawn VM and compare
+5. **Start simple**: Test with hand-written bytecode before real plugins
+6. **Use existing plugins**: SourceMod plugins are great test cases
+
 ---
 
 ## Appendix A: Complete Opcode Reference
@@ -1118,6 +1234,20 @@ PUSH.pri          // Push address
 // Callee:
 LOAD.S.pri 8      // Load address
 // Now can use STOR.I to modify through reference
+```
+
+### Pattern: Multi-dimensional Array Access
+
+For `array[i][j]` where each dimension is size `dim1` and `dim2`:
+```
+// Given: array base at DAT+base, i in PRI, j in ALT
+CONST.pri i         // i
+SMUL.C dim2         // i * dim2
+ADD                 // (i * dim2) + j
+SHL.C.pri 2         // ((i * dim2) + j) * 4 (cellsize)
+ADD.C base          // base + offset
+MOVE.alt            // Address in ALT
+LOAD.I              // Load value
 ```
 
 ---
